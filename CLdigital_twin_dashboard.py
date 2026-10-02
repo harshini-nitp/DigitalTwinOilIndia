@@ -9,8 +9,8 @@ This dashboard implements, end to end:
   4. Rod-floating detection and impact-loading minimization
   5. Pump efficiency and equipment reliability tracking
   6. Steam / energy consumption optimization and cost reduction
-  7. A live "Expected Benefits" panel that measures AI-optimized operation
-     against a naive/fixed-setting baseline in real time
+  7. A simulation-based performance panel comparing
+   ML-optimized operation against a fixed-setting baseline
 
 ARCHITECTURE NOTE:
   The simulation advances one simulated "day" per Streamlit script run and
@@ -89,7 +89,7 @@ def load_and_train_models():
         data_source = "srp_daily_operations.csv"
     except FileNotFoundError:
         daily_ops = generate_synthetic_operations_data()
-        data_source = "synthetic (srp_daily_operations.csv not found)"
+        data_source = "Physics-informed synthetic data (srp_daily_operations.csv not found)"
 
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import mean_absolute_error, r2_score
@@ -109,26 +109,26 @@ def load_and_train_models():
     )
 
     # Oil production model
-    pump_ai = RandomForestRegressor(
+    pump_ml = RandomForestRegressor(
         n_estimators=150,
         random_state=42
     )
-    pump_ai.fit(X_train, y_oil_train)
+    pump_ml.fit(X_train, y_oil_train)
 
-    oil_test_pred = pump_ai.predict(X_test)
+    oil_test_pred = pump_ml.predict(X_test)
 
     oil_mae = mean_absolute_error(y_oil_test, oil_test_pred)
     oil_r2 = r2_score(y_oil_test, oil_test_pred)
 
     # Rod floating risk model
-    health_ai = RandomForestClassifier(
+    health_ml = RandomForestClassifier(
         n_estimators=150,
         class_weight="balanced",
         random_state=42
     )
-    health_ai.fit(X_train, y_rod_train)
+    health_ml.fit(X_train, y_rod_train)
 
-    rod_test_pred = health_ai.predict(X_test)
+    rod_test_pred = health_ml.predict(X_test)
 
     rod_precision = precision_score(
         y_rod_test,
@@ -156,19 +156,19 @@ def load_and_train_models():
         "rod_f1": rod_f1,
     }
 
-    return pump_ai, health_ai, data_source, validation_metrics
+    return pump_ml, health_ml, data_source, validation_metrics
 
 
-pump_ai, health_ai, DATA_SOURCE, VALIDATION_METRICS = load_and_train_models()
+pump_ml, health_ml, DATA_SOURCE, VALIDATION_METRICS = load_and_train_models()
 
 def predict_oil_rate(temp, visc, stroke, spm):
     df = pd.DataFrame([[temp, visc, stroke, spm]], columns=FEATURES)
-    return pump_ai.predict(df)[0]
+    return pump_ml.predict(df)[0]
 
 
 def predict_rod_floating_risk(temp, visc, stroke, spm):
     df = pd.DataFrame([[temp, visc, stroke, spm]], columns=FEATURES)
-    return health_ai.predict_proba(df)[0][1]
+    return health_ml.predict_proba(df)[0][1]
 
 
 # =====================================================================
@@ -200,14 +200,14 @@ def days_until_threshold(temp_c, threshold=STEAM_THRESHOLD_TEMP):
 
 
 def estimate_injection_duration_days(steam_volume_bbl):
-    """Shared by both the AI-optimized and baseline wells so the two never
+    """Shared by both the ML-optimized and baseline wells so the two never
     drift apart due to a duplicated formula."""
     return max(1, int(round(steam_volume_bbl / STEAM_INJECTION_RATE_BBL_PER_DAY)))
 
 
 def simulate_cycle_production(peak_temp, stroke, spm, max_days=150):
     """Roll a production cycle forward from peak_temp down to the
-    re-injection threshold, using the trained pump_ai at each day's
+    re-injection threshold, using the trained pump_ml at each day's
     predicted temperature/viscosity and a FIXED representative SRP
     setting for the whole cycle (chosen by the SRP optimizer at peak
     conditions — see optimize_css_cycle). Returns (total_oil_bbl,
@@ -348,10 +348,7 @@ def rolling_reliability_index(risk_history, window=15):
     return float(np.clip((1 - np.mean(recent)) * 100, 0, 100))
 
 
-def estimated_days_to_failure(risk_prob):
-    if risk_prob <= 0.001:
-        return "> 300"
-    return f"~{int(min(300, 1 / risk_prob))}"
+
 
 
 # =====================================================================
@@ -384,10 +381,10 @@ if "sim" not in st.session_state:
 
 def advance_one_day(sim, oil_price, steam_cost, risk_tolerance, energy_cost_per_kwh, max_sor):
     """Mutates `sim` forward by exactly one simulated day, for both the
-    AI-optimized well and the fixed-setting baseline well."""
+    ML-optimized well and the fixed-setting baseline well."""
     sim["day"] += 1
 
-    # ---------------- AI-OPTIMIZED WELL ----------------
+    # ---------------- ML-optimized WELL ----------------
     if sim["state"] == "PRODUCING":
         visc = viscosity_from_temp(sim["temp"])
         srp = get_optimal_srp_settings(sim["temp"], visc, risk_tolerance, oil_price, energy_cost_per_kwh)
@@ -496,18 +493,25 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    with st.expander("📊 Data sources feeding this twin"):
+    with st.expander("📊 Data Sources & Future Integration"):
         st.markdown(f"""
-        - Production history
-        - CSS cycle records (steam injection parameters)
-        - VFD & SRP operating data
-        - Rod failure / pump-unsetting history
-        - Well completion & reservoir data
-        - Fluid properties & pressure data
+        **Current Model Data**
+        - SRP operating data
+        - Reservoir temperature
+        - Oil viscosity
+        - Stroke length and SPM
+        - Oil production rate
+        - Rod-floating history
+
+        **Future Integration**
+        - CSS cycle records and steam injection parameters
+        - VFD / SRP telemetry
+        - Well completion and reservoir data
+        - Fluid properties and pressure data
+        - Rod failure history
 
         **Model data source:** `{DATA_SOURCE}`
         """)
-
 sleep_time = {"Slow": 4.0, "Normal": 2.5, "Fast": 1.0}[sim_speed]
 
 # =====================================================================
@@ -522,6 +526,10 @@ if running or step_once:
 # =====================================================================
 st.title("🛢️ Well-to-Surface Digital Twin")
 st.markdown("### CSS / SRP Advanced Control Room")
+st.caption(
+    "Model-based simulation using physics-informed relationships and ML predictions. "
+    "Field telemetry integration is planned for future deployment."
+)
 
 pump_is_running = sim["state"] == "PRODUCING"
 
@@ -536,8 +544,8 @@ else:
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Reservoir Temp", f"{sim['temp']:.1f} °C")
 c2.metric("Oil Viscosity", f"{viscosity_from_temp(sim['temp']):.0f} cP")
-c3.metric("Pump Fillage / Efficiency", f"{sim['fillage']:.0f} %" if pump_is_running else "—")
-c4.metric("Motor Load", f"{sim['motor_load']:.1f} kW")
+c3.metric("Estimated Pump Fillage", f"{sim['fillage']:.0f} %" if pump_is_running else "—")
+c4.metric("Estimated Motor Load", f"{sim['motor_load']:.1f} kW")
 c5.metric("Target Stroke", f"{sim['stroke']} in" if sim["stroke"] else "—")
 c6.metric("Target Speed", f"{sim['spm']} SPM" if sim["spm"] else "—")
 st.divider()
@@ -555,9 +563,10 @@ with col1:
     else:
         st.success(f"✅ Healthy — risk {sim['risk']:.0%}, within tolerance.")
     reliability_index = rolling_reliability_index(sim["prod_hist_risk"])
-    days_to_fail = estimated_days_to_failure(sim["risk"]) if pump_is_running else "—"
-    st.caption(f"Equipment Reliability Index (producing days only): **{reliability_index:.0f}%**  |  "
-               f"Est. days to next incident: **{days_to_fail}**")
+    st.caption(
+    f"Equipment Reliability Index (producing days only): "
+    f"**{reliability_index:.0f}%**"
+)
 
 with col2:
     st.subheader("🔥 CSS Cycle Planner")
@@ -625,7 +634,7 @@ with chart_col2:
     st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_chart_{sim['day']}")
 
 # ---------------- EXPECTED BENEFITS / KPI PANEL ----------------
-st.subheader("📈 Expected Benefits — AI-Optimized vs. Fixed-Setting Baseline")
+st.subheader("📈 Projected Performance — ML-Optimized vs. Fixed-Setting Baseline")
 oil_uplift = ((sim["cum_oil_ai"] - sim["cum_oil_base"]) / sim["cum_oil_base"] * 100) if sim["cum_oil_base"] > 0 else 0
 sor_ai = sim["cum_steam_ai"] / sim["cum_oil_ai"] if sim["cum_oil_ai"] > 0 else 0
 sor_base = sim["cum_steam_base"] / sim["cum_oil_base"] if sim["cum_oil_base"] > 0 else 0
@@ -636,10 +645,18 @@ energy_reduction = ((energy_per_bbl_base - energy_per_bbl_ai) / energy_per_bbl_b
 incident_reduction = sim["cum_incidents_base"] - sim["cum_incidents_ai"]
 
 b1, b2, b3, b4 = st.columns(4)
-b1.metric("Cumulative Oil Uplift", f"{oil_uplift:+.1f}%", help="vs. fixed-setting baseline well")
+b1.metric(
+    "Projected Oil Difference",
+    f"{oil_uplift:+.1f}%",
+    help="Simulation-based comparison vs. fixed-setting baseline"
+)
 b2.metric("SOR (Steam-Oil Ratio)", f"{sor_ai:.2f}", f"{-sor_reduction:+.1f}% vs baseline", delta_color="inverse")
 b3.metric("Energy per bbl", f"${energy_per_bbl_ai:.2f}", f"{-energy_reduction:+.1f}% vs baseline", delta_color="inverse")
-b4.metric("Rod-Floating Incidents Avoided", f"{max(incident_reduction, 0)}", help="cumulative, vs. baseline")
+b4.metric(
+    "High-Risk Events vs. Baseline",
+    f"{incident_reduction:+d}",
+    help="Simulation count of days where predicted rod-floating risk exceeded 50%, compared with the fixed baseline"
+)
 
 # =====================================================================
 # 11. AUTO-REFRESH (only while running — paused state does nothing here,
