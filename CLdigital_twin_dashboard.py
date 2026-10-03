@@ -363,6 +363,7 @@ def init_sim_state():
         "stroke": None, "spm": None, "risk": 0.0, "oil": 0.0, "motor_load": 0.0, "fillage": 0.0,
         "hist_day": [], "hist_oil": [], "hist_temp": [], "hist_load": [],
         "prod_hist_risk": [],   # risk logged ONLY on producing days
+        "prod_hist_day": [],
         # baseline (fixed-setting) well, for the benefits panel
         "b_stroke": 100, "b_spm": 4.0, "b_steam_volume": 10000, "b_soak_days": 5,
         "b_state": "PRODUCING", "b_temp": 200.0,
@@ -398,8 +399,8 @@ def advance_one_day(sim, oil_price, steam_cost, risk_tolerance, energy_cost_per_
         sim["cum_energy_ai"] += sim["motor_load"] * 24 * energy_cost_per_kwh
         if sim["risk"] > 0.5:
             sim["cum_incidents_ai"] += 1
+        sim["prod_hist_day"].append(sim["day"])
         sim["prod_hist_risk"].append(sim["risk"])
-
         sim["temp"] = cool_one_day(sim["temp"])
         if sim["temp"] <= STEAM_THRESHOLD_TEMP:
             with st.spinner("Optimizing next CSS cycle (steam volume + soak time)..."):
@@ -469,6 +470,7 @@ def advance_one_day(sim, oil_price, steam_cost, risk_tolerance, energy_cost_per_
             sim[key].pop(0)
     if len(sim["prod_hist_risk"]) > 15:
         sim["prod_hist_risk"].pop(0)
+        sim["prod_hist_day"].pop(0)
 
 
 # =====================================================================
@@ -513,6 +515,7 @@ with st.sidebar:
         **Model data source:** `{DATA_SOURCE}`
         """)
 sleep_time = {"Slow": 4.0, "Normal": 2.5, "Fast": 1.0}[sim_speed]
+
 
 # =====================================================================
 # 9. ADVANCE SIMULATION (one day per script run, or on manual Step)
@@ -590,7 +593,7 @@ with col3:
     fig_gauge = go.Figure(go.Indicator(
         mode="gauge+number",
         value=sim["risk"] * 100,
-        title={'text': "Rod Floating Risk (%)"},
+        title={'text': "Rod Floating Risk (%)", 'font': {'size': 16} },
         gauge={
             'axis': {'range': [0, 100]},
             'bar': {'color': "white"},
@@ -601,7 +604,7 @@ with col3:
             'threshold': {'line': {'color': "black", 'width': 3},
                           'thickness': 0.8, 'value': risk_tolerance * 100},
         }))
-    fig_gauge.update_layout(height=200, margin=dict(l=20, r=20, t=30, b=20))
+    fig_gauge.update_layout(height=240, margin=dict(l=20, r=20, t=50, b=20))
     st.plotly_chart(fig_gauge, use_container_width=True, key=f"gauge_{sim['day']}")
 
 chart_col1, chart_col2 = st.columns([2, 1])
@@ -624,11 +627,18 @@ with chart_col1:
 
 with chart_col2:
     recent_risk = sim["prod_hist_risk"][-10:]
+    recent_days = sim["prod_hist_day"][-10:]
+
     fig_bar = go.Figure(go.Bar(
-        x=list(range(len(recent_risk))), y=[r * 100 for r in recent_risk],
-        marker_color=['#FF4B4B' if r > risk_tolerance else '#1E90FF' for r in recent_risk]))
+       x=recent_days,
+       y=[r * 100 for r in recent_risk],
+       marker_color=[
+          '#FF4B4B' if r > risk_tolerance else '#1E90FF'
+          for r in recent_risk
+        ]
+    ))
     fig_bar.update_layout(
-        title="Rod-Floating Risk, Last 10 Producing Days (%)", yaxis_title="Risk %",
+        title="Rod-Floating Risk - Last 10 Producing Days", yaxis_title="Risk(%)",
         xaxis_title="", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
         height=350, margin=dict(l=0, r=0, t=40, b=0))
     st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_chart_{sim['day']}")
@@ -636,9 +646,21 @@ with chart_col2:
 # ---------------- EXPECTED BENEFITS / KPI PANEL ----------------
 st.subheader("📈 Projected Performance — ML-Optimized vs. Fixed-Setting Baseline")
 oil_uplift = ((sim["cum_oil_ai"] - sim["cum_oil_base"]) / sim["cum_oil_base"] * 100) if sim["cum_oil_base"] > 0 else 0
-sor_ai = sim["cum_steam_ai"] / sim["cum_oil_ai"] if sim["cum_oil_ai"] > 0 else 0
-sor_base = sim["cum_steam_base"] / sim["cum_oil_base"] if sim["cum_oil_base"] > 0 else 0
-sor_reduction = ((sor_base - sor_ai) / sor_base * 100) if sor_base > 0 else 0
+sor_ai = (
+    sim["cum_steam_ai"] / sim["cum_oil_ai"]
+    if sim["cum_steam_ai"] > 0 and sim["cum_oil_ai"] > 0
+    else None
+)
+sor_base = (
+    sim["cum_steam_base"] / sim["cum_oil_base"]
+    if sim["cum_steam_base"] > 0 and sim["cum_oil_base"] > 0
+    else None
+)
+sor_reduction = (
+    ((sor_base - sor_ai) / sor_base * 100)
+    if sor_base is not None and sor_ai is not None and sor_base > 0
+    else None
+)
 energy_per_bbl_ai = sim["cum_energy_ai"] / sim["cum_oil_ai"] if sim["cum_oil_ai"] > 0 else 0
 energy_per_bbl_base = sim["cum_energy_base"] / sim["cum_oil_base"] if sim["cum_oil_base"] > 0 else 0
 energy_reduction = ((energy_per_bbl_base - energy_per_bbl_ai) / energy_per_bbl_base * 100) if energy_per_bbl_base > 0 else 0
@@ -650,12 +672,54 @@ b1.metric(
     f"{oil_uplift:+.1f}%",
     help="Simulation-based comparison vs. fixed-setting baseline"
 )
-b2.metric("SOR (Steam-Oil Ratio)", f"{sor_ai:.2f}", f"{-sor_reduction:+.1f}% vs baseline", delta_color="inverse")
+b2.metric(
+    "Cumulative SOR",
+    f"{sor_ai:.2f}" if sor_ai is not None else "N/A",
+    f"{-sor_reduction:+.1f}% vs baseline"
+    if sor_reduction is not None else None,
+    delta_color="inverse",
+    help="Cumulative steam injected divided by cumulative oil produced. N/A until the first CSS injection cycle."
+)
 b3.metric("Energy per bbl", f"${energy_per_bbl_ai:.2f}", f"{-energy_reduction:+.1f}% vs baseline", delta_color="inverse")
 b4.metric(
     "High-Risk Events vs. Baseline",
     f"{incident_reduction:+d}",
     help="Simulation count of days where predicted rod-floating risk exceeded 50%, compared with the fixed baseline"
+)
+
+# ---------------- ML MODEL VALIDATION ----------------
+st.divider()
+st.subheader("📐 ML Model Validation")
+st.caption(
+    "Validation metrics on the available model dataset. "
+    "These are model-validation results, not measured Baghewala field performance."
+)
+
+m1, m2, m3, m4, m5 = st.columns(5)
+
+m1.metric(
+    "Oil MAE",
+    f"{VALIDATION_METRICS['oil_mae']:.2f} bbl/day"
+)
+
+m2.metric(
+    "Oil R²",
+    f"{VALIDATION_METRICS['oil_r2']:.3f}"
+)
+
+m3.metric(
+    "Risk Precision",
+    f"{VALIDATION_METRICS['rod_precision']:.2%}"
+)
+
+m4.metric(
+    "Risk Recall",
+    f"{VALIDATION_METRICS['rod_recall']:.2%}"
+)
+
+m5.metric(
+    "Risk F1",
+    f"{VALIDATION_METRICS['rod_f1']:.2%}"
 )
 
 # =====================================================================
@@ -665,3 +729,4 @@ b4.metric(
 if running:
     time.sleep(sleep_time)
     st.rerun()
+
